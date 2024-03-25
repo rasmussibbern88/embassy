@@ -43,7 +43,7 @@ pub(crate) enum WakeupPrescaler {
     Div16 = 16,
 }
 
-#[cfg(any(stm32wb, stm32f4, stm32l0, stm32g4, stm32l5, stm32g0))]
+#[cfg(any(stm32wb, stm32f4, stm32l0, stm32g4, stm32l5, stm32g0, stm32wl))]
 impl From<WakeupPrescaler> for crate::pac::rtc::vals::Wucksel {
     fn from(val: WakeupPrescaler) -> Self {
         use crate::pac::rtc::vals::Wucksel;
@@ -341,7 +341,7 @@ impl Rtc {
     #[cfg(feature = "low-power")]
     /// start the wakeup alarm and wtih a duration that is as close to but less than
     /// the requested duration, and record the instant the wakeup alarm was started
-    pub(crate) fn start_wakeup_alarm(
+    pub fn start_wakeup_alarm(
         &self,
         requested_duration: embassy_time::Duration,
         cs: critical_section::CriticalSection,
@@ -395,8 +395,6 @@ impl Rtc {
             rtc_ticks,
             instant,
         );
-
-        assert!(self.stop_time.borrow(cs).replace(Some(instant)).is_none())
     }
 
     #[cfg(feature = "low-power")]
@@ -453,6 +451,8 @@ impl Rtc {
         unsafe { <RTC as crate::rtc::sealed::Instance>::WakeupInterrupt::enable() };
 
         EXTI.rtsr(0).modify(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));
+
+        #[cfg(not(stm32wl))]
         EXTI.imr(0).modify(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));
     }
 }

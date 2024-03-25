@@ -10,6 +10,18 @@ use embassy_stm32::Config;
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
+
+use embassy_executor::Spawner;
+use embassy_stm32::low_power::Executor;
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    Executor::take().run(|spawner| {
+        unwrap!(spawner.spawn(async_main(spawner)));
+    });
+}
+
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = Config::default();
