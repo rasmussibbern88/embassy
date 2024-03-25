@@ -189,7 +189,7 @@ impl<'d> Output<'d> {
     }
 }
 
-fn convert_drive(drive: OutputDrive) -> DRIVE_A {
+pub(crate) fn convert_drive(drive: OutputDrive) -> DRIVE_A {
     match drive {
         OutputDrive::Standard => DRIVE_A::S0S1,
         OutputDrive::HighDrive0Standard1 => DRIVE_A::H0S1,
@@ -473,10 +473,12 @@ impl sealed::Pin for AnyPin {
 
 // ====================
 
+#[cfg(not(feature = "_nrf51"))]
 pub(crate) trait PselBits {
     fn psel_bits(&self) -> u32;
 }
 
+#[cfg(not(feature = "_nrf51"))]
 impl<'a, P: Pin> PselBits for Option<PeripheralRef<'a, P>> {
     #[inline]
     fn psel_bits(&self) -> u32 {

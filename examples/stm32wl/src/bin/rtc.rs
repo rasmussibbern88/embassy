@@ -73,7 +73,7 @@ async fn main(_spawner: Spawner) {
         .unwrap();
 
     let mut rtc = Rtc::new(p.RTC, RtcConfig::default());
-    info!("Got RTC! {:?}", now.timestamp());
+    info!("Got RTC! {:?}", now.and_utc().timestamp());
 
     rtc.set_datetime(now.into()).expect("datetime not set");
 
@@ -83,6 +83,8 @@ async fn main(_spawner: Spawner) {
 
     let then: NaiveDateTime = rtc.now().unwrap().into();
     info!("Got RTC! {:?}", then.timestamp());
+    info!("Got RTC! {:?}", then.and_utc().timestamp());
+
     // let duration: Duration = Duration.from_secs(12);
     let mut adc = embassy_stm32::adc::Adc::new(p.ADC, &mut Delay);
     let mut adc_pin = p.PB4;

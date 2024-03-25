@@ -815,7 +815,7 @@ pub(crate) mod sealed {
 
         #[inline]
         fn _bank(&self) -> Bank {
-            match self.pin_bank() & 0x20 {
+            match self.pin_bank() >> 5 {
                 #[cfg(feature = "qspi-as-gpio")]
                 1 => Bank::Qspi,
                 _ => Bank::Bank0,
@@ -976,8 +976,6 @@ impl_pin!(PIN_QSPI_SD3, Bank::Qspi, 5);
 // ====================
 
 mod eh02 {
-    use core::convert::Infallible;
-
     use super::*;
 
     impl<'d> embedded_hal_02::digital::v2::InputPin for Input<'d> {

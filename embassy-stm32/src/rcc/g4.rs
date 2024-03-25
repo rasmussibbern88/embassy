@@ -1,13 +1,9 @@
-use stm32_metapac::flash::vals::Latency;
-use stm32_metapac::rcc::vals::{Adcsel, Sw};
-use stm32_metapac::FLASH;
-
+use crate::pac::flash::vals::Latency;
 pub use crate::pac::rcc::vals::{
-    Adcsel as AdcClockSource, Clk48sel as Clk48Src, Fdcansel as FdCanClockSource, Hpre as AHBPrescaler,
-    Pllm as PllPreDiv, Plln as PllMul, Pllp as PllPDiv, Pllq as PllQDiv, Pllr as PllRDiv, Pllsrc, Ppre as APBPrescaler,
-    Sw as Sysclk,
+    Hpre as AHBPrescaler, Pllm as PllPreDiv, Plln as PllMul, Pllp as PllPDiv, Pllq as PllQDiv, Pllr as PllRDiv,
+    Pllsrc as PllSource, Ppre as APBPrescaler, Sw as Sysclk,
 };
-use crate::pac::{PWR, RCC};
+use crate::pac::{FLASH, PWR, RCC};
 use crate::time::Hertz;
 
 /// HSI speed
@@ -38,7 +34,7 @@ pub struct Hse {
 /// frequency ranges for each of these settings.
 pub struct Pll {
     /// PLL Source clock selection.
-    pub source: Pllsrc,
+    pub source: PllSource,
 
     /// PLL pre-divider
     pub prediv: PllPreDiv,
@@ -74,7 +70,7 @@ pub struct Config {
     /// PLL Configuration
     pub pll: Option<Pll>,
 
-    /// Iff PLL is requested as the main clock source in the `mux` field then the PLL configuration
+    /// If PLL is requested as the main clock source in the `sys` field then the PLL configuration
     /// MUST turn on the PLLR output.
     pub ahb_pre: AHBPrescaler,
     pub apb1_pre: APBPrescaler,
@@ -82,24 +78,15 @@ pub struct Config {
 
     pub low_power_run: bool,
 
-    /// Sets the clock source for the 48MHz clock used by the USB and RNG peripherals.
-    pub clk48_src: Clk48Src,
-
     /// Low-Speed Clock Configuration
     pub ls: super::LsConfig,
-
-    /// Clock Source for ADCs 1 and 2
-    pub adc12_clock_source: AdcClockSource,
-
-    /// Clock Source for ADCs 3, 4 and 5
-    pub adc345_clock_source: AdcClockSource,
-
-    /// Clock Source for FDCAN
-    pub fdcan_clock_source: FdCanClockSource,
 
     /// Enable range1 boost mode
     /// Recommended when the SYSCLK frequency is greater than 150MHz.
     pub boost: bool,
+
+    /// Per-peripheral kernel clock selection muxes
+    pub mux: super::mux::ClockMux,
 }
 
 impl Default for Config {
@@ -115,16 +102,14 @@ impl Default for Config {
             apb1_pre: APBPrescaler::DIV1,
             apb2_pre: APBPrescaler::DIV1,
             low_power_run: false,
-            clk48_src: Clk48Src::HSI48,
             ls: Default::default(),
-            adc12_clock_source: Adcsel::DISABLE,
-            adc345_clock_source: Adcsel::DISABLE,
-            fdcan_clock_source: FdCanClockSource::PCLK1,
             boost: false,
+            mux: Default::default(),
         }
     }
 }
 
+#[derive(Default)]
 pub struct PllFreq {
     pub pll_p: Option<Hertz>,
     pub pll_q: Option<Hertz>,
@@ -165,84 +150,92 @@ pub(crate) unsafe fn init(config: Config) {
     };
 
     // Configure HSI48 if required
-    if let Some(hsi48_config) = config.hsi48 {
-        super::init_hsi48(hsi48_config);
-    }
+    let hsi48 = config.hsi48.map(super::init_hsi48);
 
-    let pll_freq = config.pll.map(|pll_config| {
-        let src_freq = match pll_config.source {
-            Pllsrc::HSI => unwrap!(hsi),
-            Pllsrc::HSE => unwrap!(hse),
-            _ => unreachable!(),
-        };
+    let pll = config
+        .pll
+        .map(|pll_config| {
+            let src_freq = match pll_config.source {
+                PllSource::HSI => unwrap!(hsi),
+                PllSource::HSE => unwrap!(hse),
+                _ => unreachable!(),
+            };
 
-        // TODO: check PLL input, internal and output frequencies for validity
+            // Disable PLL before configuration
+            RCC.cr().modify(|w| w.set_pllon(false));
+            while RCC.cr().read().pllrdy() {}
 
-        // Disable PLL before configuration
-        RCC.cr().modify(|w| w.set_pllon(false));
-        while RCC.cr().read().pllrdy() {}
+            let in_freq = src_freq / pll_config.prediv;
+            assert!(max::PLL_IN.contains(&in_freq));
+            let internal_freq = in_freq * pll_config.mul;
 
-        let internal_freq = src_freq / pll_config.prediv * pll_config.mul;
+            assert!(max::PLL_VCO.contains(&internal_freq));
 
-        RCC.pllcfgr().write(|w| {
-            w.set_plln(pll_config.mul);
-            w.set_pllm(pll_config.prediv);
-            w.set_pllsrc(pll_config.source.into());
-        });
-
-        let pll_p_freq = pll_config.divp.map(|div_p| {
-            RCC.pllcfgr().modify(|w| {
-                w.set_pllp(div_p);
-                w.set_pllpen(true);
+            RCC.pllcfgr().write(|w| {
+                w.set_plln(pll_config.mul);
+                w.set_pllm(pll_config.prediv);
+                w.set_pllsrc(pll_config.source.into());
             });
-            internal_freq / div_p
-        });
 
-        let pll_q_freq = pll_config.divq.map(|div_q| {
-            RCC.pllcfgr().modify(|w| {
-                w.set_pllq(div_q);
-                w.set_pllqen(true);
+            let pll_p_freq = pll_config.divp.map(|div_p| {
+                RCC.pllcfgr().modify(|w| {
+                    w.set_pllp(div_p);
+                    w.set_pllpen(true);
+                });
+                let freq = internal_freq / div_p;
+                assert!(max::PLL_P.contains(&freq));
+                freq
             });
-            internal_freq / div_q
-        });
 
-        let pll_r_freq = pll_config.divr.map(|div_r| {
-            RCC.pllcfgr().modify(|w| {
-                w.set_pllr(div_r);
-                w.set_pllren(true);
+            let pll_q_freq = pll_config.divq.map(|div_q| {
+                RCC.pllcfgr().modify(|w| {
+                    w.set_pllq(div_q);
+                    w.set_pllqen(true);
+                });
+                let freq = internal_freq / div_q;
+                assert!(max::PLL_Q.contains(&freq));
+                freq
             });
-            internal_freq / div_r
-        });
 
-        // Enable the PLL
-        RCC.cr().modify(|w| w.set_pllon(true));
-        while !RCC.cr().read().pllrdy() {}
+            let pll_r_freq = pll_config.divr.map(|div_r| {
+                RCC.pllcfgr().modify(|w| {
+                    w.set_pllr(div_r);
+                    w.set_pllren(true);
+                });
+                let freq = internal_freq / div_r;
+                assert!(max::PLL_R.contains(&freq));
+                freq
+            });
 
-        PllFreq {
-            pll_p: pll_p_freq,
-            pll_q: pll_q_freq,
-            pll_r: pll_r_freq,
-        }
-    });
+            // Enable the PLL
+            RCC.cr().modify(|w| w.set_pllon(true));
+            while !RCC.cr().read().pllrdy() {}
 
-    let (sys_clk, sw) = match config.sys {
-        Sysclk::HSI => (HSI_FREQ, Sw::HSI),
-        Sysclk::HSE => (unwrap!(hse), Sw::HSE),
-        Sysclk::PLL1_R => {
-            assert!(pll_freq.is_some());
-            assert!(pll_freq.as_ref().unwrap().pll_r.is_some());
+            PllFreq {
+                pll_p: pll_p_freq,
+                pll_q: pll_q_freq,
+                pll_r: pll_r_freq,
+            }
+        })
+        .unwrap_or_default();
 
-            let freq = pll_freq.as_ref().unwrap().pll_r.unwrap().0;
-
-            assert!(freq <= 170_000_000);
-
-            (Hertz(freq), Sw::PLL1_R)
-        }
+    let sys = match config.sys {
+        Sysclk::HSI => unwrap!(hsi),
+        Sysclk::HSE => unwrap!(hse),
+        Sysclk::PLL1_R => unwrap!(pll.pll_r),
         _ => unreachable!(),
     };
 
+    assert!(max::SYSCLK.contains(&sys));
+
     // Calculate the AHB frequency (HCLK), among other things so we can calculate the correct flash read latency.
-    let hclk = sys_clk / config.ahb_pre;
+    let hclk = sys / config.ahb_pre;
+    assert!(max::HCLK.contains(&hclk));
+
+    let (pclk1, pclk1_tim) = super::util::calc_pclk(hclk, config.apb1_pre);
+    let (pclk2, pclk2_tim) = super::util::calc_pclk(hclk, config.apb2_pre);
+    assert!(max::PCLK.contains(&pclk2));
+    assert!(max::PCLK.contains(&pclk2));
 
     // Configure Core Boost mode ([RM0440] p234 – inverted because setting r1mode to 0 enables boost mode!)
     if config.boost {
@@ -258,22 +251,27 @@ pub(crate) unsafe fn init(config: Config) {
         // 4. Configure and switch to new frequency
     }
 
+    let latency = match (config.boost, hclk.0) {
+        (true, ..=34_000_000) => Latency::WS0,
+        (true, ..=68_000_000) => Latency::WS1,
+        (true, ..=102_000_000) => Latency::WS2,
+        (true, ..=136_000_000) => Latency::WS3,
+        (true, _) => Latency::WS4,
+
+        (false, ..=36_000_000) => Latency::WS0,
+        (false, ..=60_000_000) => Latency::WS1,
+        (false, ..=90_000_000) => Latency::WS2,
+        (false, ..=120_000_000) => Latency::WS3,
+        (false, _) => Latency::WS4,
+    };
+
     // Configure flash read access latency based on boost mode and frequency (RM0440 p98)
     FLASH.acr().modify(|w| {
-        w.set_latency(match (config.boost, hclk.0) {
-            (true, ..=34_000_000) => Latency::WS0,
-            (true, ..=68_000_000) => Latency::WS1,
-            (true, ..=102_000_000) => Latency::WS2,
-            (true, ..=136_000_000) => Latency::WS3,
-            (true, _) => Latency::WS4,
-
-            (false, ..=36_000_000) => Latency::WS0,
-            (false, ..=60_000_000) => Latency::WS1,
-            (false, ..=90_000_000) => Latency::WS2,
-            (false, ..=120_000_000) => Latency::WS3,
-            (false, _) => Latency::WS4,
-        })
+        w.set_latency(latency);
     });
+
+    // Spin until the effective flash latency is set.
+    while FLASH.acr().read().latency() != latency {}
 
     if config.boost {
         // 5. Wait for at least 1us and then reconfigure the AHB prescaler to get the needed HCLK clock frequency.
@@ -282,96 +280,70 @@ pub(crate) unsafe fn init(config: Config) {
 
     // Now that boost mode and flash read access latency are configured, set up SYSCLK
     RCC.cfgr().modify(|w| {
-        w.set_sw(sw);
+        w.set_sw(config.sys);
         w.set_hpre(config.ahb_pre);
         w.set_ppre1(config.apb1_pre);
         w.set_ppre2(config.apb2_pre);
     });
 
-    let (apb1_freq, apb1_tim_freq) = super::util::calc_pclk(hclk, config.apb1_pre);
-    let (apb2_freq, apb2_tim_freq) = super::util::calc_pclk(hclk, config.apb2_pre);
-
-    // Configure the 48MHz clock source for USB and RNG peripherals.
-    RCC.ccipr().modify(|w| {
-        w.set_clk48sel(match config.clk48_src {
-            Clk48Src::PLL1_Q => {
-                // Not checking that PLL1_Q is 48MHz here so as not to require the user to have a 48MHz clock.
-                // Peripherals which require one (USB, RNG) should check that they‘re driven by a valid 48MHz
-                // clock at init.
-                crate::pac::rcc::vals::Clk48sel::PLL1_Q
-            }
-            Clk48Src::HSI48 => {
-                // Make sure HSI48 is enabled
-                assert!(config.hsi48.is_some());
-                crate::pac::rcc::vals::Clk48sel::HSI48
-            }
-            _ => unreachable!(),
-        })
-    });
-
-    RCC.ccipr().modify(|w| w.set_adc12sel(config.adc12_clock_source));
-    RCC.ccipr().modify(|w| w.set_adc345sel(config.adc345_clock_source));
-    RCC.ccipr().modify(|w| w.set_fdcansel(config.fdcan_clock_source));
-
-    let adc12_ck = match config.adc12_clock_source {
-        AdcClockSource::DISABLE => None,
-        AdcClockSource::PLL1_P => pll_freq.as_ref().unwrap().pll_p,
-        AdcClockSource::SYS => Some(sys_clk),
-        _ => unreachable!(),
-    };
-
-    let adc345_ck = match config.adc345_clock_source {
-        AdcClockSource::DISABLE => None,
-        AdcClockSource::PLL1_P => pll_freq.as_ref().unwrap().pll_p,
-        AdcClockSource::SYS => Some(sys_clk),
-        _ => unreachable!(),
-    };
-
     if config.low_power_run {
-        assert!(sys_clk <= Hertz(2_000_000));
+        assert!(sys <= Hertz(2_000_000));
         PWR.cr1().modify(|w| w.set_lpr(true));
     }
 
     let rtc = config.ls.init();
 
+    config.mux.init();
+
     set_clocks!(
-        sys: Some(sys_clk),
+        sys: Some(sys),
         hclk1: Some(hclk),
         hclk2: Some(hclk),
         hclk3: Some(hclk),
-        pclk1: Some(apb1_freq),
-        pclk1_tim: Some(apb1_tim_freq),
-        pclk2: Some(apb2_freq),
-        pclk2_tim: Some(apb2_tim_freq),
-        adc: adc12_ck,
-        adc34: adc345_ck,
-        pll1_p: pll_freq.as_ref().and_then(|pll| pll.pll_p),
-        pll1_q: pll_freq.as_ref().and_then(|pll| pll.pll_p),
+        pclk1: Some(pclk1),
+        pclk1_tim: Some(pclk1_tim),
+        pclk2: Some(pclk2),
+        pclk2_tim: Some(pclk2_tim),
+        pll1_p: pll.pll_p,
+        pll1_q: pll.pll_q,
+        pll1_r: pll.pll_r,
+        hsi: hsi,
         hse: hse,
+        hsi48: hsi48,
         rtc: rtc,
     );
 }
 
-// TODO: if necessary, make more of these, gated behind cfg attrs
+/// Acceptable Frequency Ranges
+/// Currently assuming voltage scaling range 1 boost mode.
+/// Where not specified in the generic G4 reference manual (RM0440), values taken from the STM32G474 datasheet.
+/// If acceptable ranges for other G4-family chips differ, make additional max modules gated behind cfg attrs.
 mod max {
     use core::ops::RangeInclusive;
 
     use crate::time::Hertz;
 
-    /// HSE 4-48MHz (RM0440 p280)
+    /// HSE Frequency Range (RM0440 p280)
     pub(crate) const HSE_OSC: RangeInclusive<Hertz> = Hertz(4_000_000)..=Hertz(48_000_000);
 
-    /// External Clock ?-48MHz (RM0440 p280)
+    /// External Clock Frequency Range (RM0440 p280)
     pub(crate) const HSE_BYP: RangeInclusive<Hertz> = Hertz(0)..=Hertz(48_000_000);
 
-    // SYSCLK ?-170MHz (RM0440 p282)
-    //pub(crate) const SYSCLK: RangeInclusive<Hertz> = Hertz(0)..=Hertz(170_000_000);
+    /// SYSCLK Frequency Range (RM0440 p282)
+    pub(crate) const SYSCLK: RangeInclusive<Hertz> = Hertz(0)..=Hertz(170_000_000);
 
-    // PLL Output frequency ?-170MHz (RM0440 p281)
-    //pub(crate) const PCLK: RangeInclusive<Hertz> = Hertz(0)..=Hertz(170_000_000);
+    /// PLL Output Frequency Range (RM0440 p281, STM32G474 Datasheet p123, Table 46)
+    pub(crate) const PCLK: RangeInclusive<Hertz> = Hertz(8)..=Hertz(170_000_000);
 
-    // Left over from f.rs, remove if not necessary
-    //pub(crate) const HCLK: RangeInclusive<Hertz> = Hertz(12_500_000)..=Hertz(216_000_000);
-    //pub(crate) const PLL_IN: RangeInclusive<Hertz> = Hertz(1_000_000)..=Hertz(2_100_000);
-    //pub(crate) const PLL_VCO: RangeInclusive<Hertz> = Hertz(100_000_000)..=Hertz(432_000_000);
+    /// HCLK (AHB) Clock Frequency Range (STM32G474 Datasheet)
+    pub(crate) const HCLK: RangeInclusive<Hertz> = Hertz(0)..=Hertz(170_000_000);
+
+    /// PLL Source Frequency Range (STM32G474 Datasheet p123, Table 46)
+    pub(crate) const PLL_IN: RangeInclusive<Hertz> = Hertz(2_660_000)..=Hertz(16_000_000);
+
+    /// PLL VCO (internal) Frequency Range (STM32G474 Datasheet p123, Table 46)
+    pub(crate) const PLL_VCO: RangeInclusive<Hertz> = Hertz(96_000_000)..=Hertz(344_000_000);
+    pub(crate) const PLL_P: RangeInclusive<Hertz> = Hertz(2_064_500)..=Hertz(170_000_000);
+    pub(crate) const PLL_Q: RangeInclusive<Hertz> = Hertz(8_000_000)..=Hertz(170_000_000);
+    pub(crate) const PLL_R: RangeInclusive<Hertz> = Hertz(8_000_000)..=Hertz(170_000_000);
 }
